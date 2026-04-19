@@ -1,4 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { auth, db } from '../lib/firebase';
+import { onAuthStateChanged, signOut, User as FirebaseUser } from 'firebase/auth';
+import { doc, onSnapshot } from 'firebase/firestore';
 
 interface User {
   id: string;
@@ -10,7 +13,6 @@ interface User {
 interface AuthContextType {
   user: User | null;
   token: string | null;
-  login: (user: User, token: string) => void;
   logout: () => void;
   loading: boolean;
 }
@@ -23,31 +25,47 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const savedUser = localStorage.getItem('user');
-    const savedToken = localStorage.getItem('token');
-    if (savedUser && savedToken) {
-      setUser(JSON.parse(savedUser));
-      setToken(savedToken);
-    }
-    setLoading(false);
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      if (fbUser) {
+        const idToken = await fbUser.getIdToken();
+        setToken(idToken);
+        
+        // Listen for profile changes in Firestore
+        const userDocRef = doc(db, 'users', fbUser.uid);
+        const unsubDoc = onSnapshot(userDocRef, (docSnap) => {
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            setUser({
+              id: fbUser.uid,
+              username: data.username || fbUser.displayName || 'Usuario',
+              role: data.role || 'Regular',
+              profilePic: data.profilePic || fbUser.photoURL || 'https://picsum.photos/seed/user/200',
+            });
+          }
+          setLoading(false);
+        });
+        
+        return () => unsubDoc();
+      } else {
+        setUser(null);
+        setToken(null);
+        setLoading(false);
+      }
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  const login = (user: User, token: string) => {
-    setUser(user);
-    setToken(token);
-    localStorage.setItem('user', JSON.stringify(user));
-    localStorage.setItem('token', token);
-  };
-
-  const logout = () => {
-    setUser(null);
-    setToken(null);
-    localStorage.removeItem('user');
-    localStorage.removeItem('token');
+  const logout = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error('Error at logout:', error);
+    }
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, login, logout, loading }}>
+    <AuthContext.Provider value={{ user, token, logout, loading }}>
       {children}
     </AuthContext.Provider>
   );

@@ -7,37 +7,52 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { Crown, Key, User as UserIcon, Loader2 } from 'lucide-react';
+import { Crown, Key, Mail, User as UserIcon, Loader2 } from 'lucide-react';
+import { auth, db } from '../lib/firebase';
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile } from 'firebase/auth';
+import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
 
 const Auth = () => {
   const [isLogin, setIsLogin] = useState(true);
-  const [formData, setFormData] = useState({ username: '', password: '', vipCode: '' });
+  const [formData, setFormData] = useState({ username: '', email: '', password: '' });
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';
     
     try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData),
-      });
-      const data = await res.json();
-      
-      if (res.ok) {
-        login(data.user, data.token);
-        toast.success(isLogin ? '¡Bienvenido de nuevo!' : '¡Registro exitoso!');
+      if (isLogin) {
+        // Sign In
+        const userCredential = await signInWithEmailAndPassword(auth, formData.email, formData.password);
+        toast.success('¡Bienvenido de nuevo!');
         navigate('/');
       } else {
-        toast.error(data.error || 'Algo salió mal');
+        // Sign Up
+        const userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
+        const user = userCredential.user;
+        
+        await updateProfile(user, { displayName: formData.username });
+        
+        // Create user profile in Firestore
+        await setDoc(doc(db, 'users', user.uid), {
+          username: formData.username,
+          role: 'Regular',
+          profilePic: `https://picsum.photos/seed/${user.uid}/200`,
+          createdAt: serverTimestamp(),
+        });
+
+        toast.success('¡Cuentas creada exitosamente!');
+        navigate('/');
       }
-    } catch (err) {
-      toast.error('Error de conexión');
+    } catch (error: any) {
+      console.error('Auth error:', error);
+      let message = 'Algo salió mal';
+      if (error.code === 'auth/email-already-in-use') message = 'El email ya está registrado';
+      if (error.code === 'auth/wrong-password') message = 'Contraseña incorrecta';
+      if (error.code === 'auth/user-not-found') message = 'Usuario no encontrado';
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -84,15 +99,30 @@ const Auth = () => {
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-4">
+                    {!isLogin && (
+                      <div className="space-y-2">
+                        <div className="relative">
+                          <UserIcon className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                          <Input
+                            placeholder="Nombre de usuario"
+                            className="pl-10"
+                            required
+                            value={formData.username}
+                            onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                          />
+                        </div>
+                      </div>
+                    )}
                     <div className="space-y-2">
                       <div className="relative">
-                        <UserIcon className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                        <Mail className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
                         <Input
-                          placeholder="Nombre de usuario"
+                          type="email"
+                          placeholder="Correo electrónico"
                           className="pl-10"
                           required
-                          value={formData.username}
-                          onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                          value={formData.email}
+                          onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                         />
                       </div>
                     </div>

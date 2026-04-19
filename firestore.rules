@@ -1,0 +1,112 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 3. Primitive Definition
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isVIP() {
+      let data = getUserData();
+      return data.role == 'VIP' || data.role == 'Admin VIP';
+    }
+
+    function isAdmin() {
+      return getUserData().role == 'Admin VIP';
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 1. Users
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.username is string && data.username.size() >= 3 && data.username.size() <= 32
+          && data.role in ['Regular', 'VIP', 'Admin VIP']
+          && data.createdAt == request.time;
+      }
+
+      allow get: if isSignedIn();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) && isValidUser(incoming()) && incoming().role == 'Regular';
+      allow update: if isOwner(userId) && (
+        // Only allow updating profilePic and maybe username (if verified)
+        // role updates MUST be restricted to Cloud Functions or Admin SDK
+        incoming().diff(existing()).affectedKeys().hasOnly(['profilePic', 'username'])
+      ) || isAdmin();
+    }
+
+    // 2. Prompts
+    match /prompts/{promptId} {
+      function isValidPrompt(data) {
+        return data.title is string && data.title.size() <= 200
+          && data.content is string && data.content.size() <= 5000
+          && data.category is string
+          && data.authorId == request.auth.uid
+          && data.createdAt == request.time
+          && (data.isVip == false || isVIP());
+      }
+
+      allow read: if (existing().isPublic == true) || (isSignedIn() && existing().authorId == request.auth.uid) || isAdmin();
+      allow list: if (resource.data.isPublic == true) || (resource.data.authorId == request.auth.uid) || isAdmin();
+      
+      allow create: if isSignedIn() && isValidPrompt(incoming()) && isValidId(promptId);
+      allow update: if isSignedIn() && (
+        (isOwner(existing().authorId) && incoming().authorId == existing().authorId && incoming().createdAt == existing().createdAt) 
+        || (incoming().diff(existing()).affectedKeys().hasOnly(['copyCount']) && incoming().copyCount == existing().copyCount + 1)
+        || isAdmin()
+      );
+      allow delete: if isOwner(existing().authorId) || isAdmin();
+    }
+
+    // 4. Conversations
+    match /conversations/{conversationId} {
+      function isParticipant(data) {
+        return request.auth.uid == data.user1Id || request.auth.uid == data.user2Id;
+      }
+
+      allow get: if isSignedIn() && isParticipant(existing());
+      allow list: if isSignedIn() && (resource.data.user1Id == request.auth.uid || resource.data.user2Id == request.auth.uid);
+      
+      allow create: if isSignedIn() && isParticipant(incoming()) && incoming().createdAt == request.time;
+      allow update: if isSignedIn() && isParticipant(existing()) && incoming().updatedAt == request.time;
+      allow delete: if isAdmin();
+
+      // Subcollection: Messages
+      match /messages/{messageId} {
+        function isValidMessage(data) {
+          return data.content is string && data.content.size() <= 2000
+            && data.senderId == request.auth.uid
+            && data.createdAt == request.time;
+        }
+
+        allow read, list: if isSignedIn() && isParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
+        allow create: if isSignedIn() && isParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) && isValidMessage(incoming());
+        allow update: if isSignedIn() && isOwner(existing().senderId) && incoming().diff(existing()).affectedKeys().hasOnly(['content', 'isEdited', 'updatedAt']) && incoming().updatedAt == request.time;
+        allow delete: if isOwner(existing().senderId) || isAdmin();
+      }
+    }
+  }
+}
