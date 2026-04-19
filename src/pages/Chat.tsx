@@ -36,9 +36,10 @@ const Chat = () => {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await res.json();
-      setConversations(data);
+      setConversations(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error(err);
+      setConversations([]);
     }
   };
 
@@ -48,9 +49,10 @@ const Chat = () => {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await res.json();
-      setMessages(data);
+      setMessages(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error(err);
+      setMessages([]);
     }
   };
 
@@ -60,9 +62,10 @@ const Chat = () => {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await res.json();
-      setDirectory(data);
+      setDirectory(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error(err);
+      setDirectory([]);
     }
   };
 

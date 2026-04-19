@@ -28,9 +28,10 @@ const Community = () => {
       const url = `/api/prompts?isVip=${isVipParam}&category=${filters.category === 'Todas' ? '' : filters.category}&search=${filters.search}&order=${filters.order}`;
       const res = await fetch(url);
       const data = await res.json();
-      setPrompts(data);
+      setPrompts(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error(err);
+      setPrompts([]);
     } finally {
       setLoading(false);
     }

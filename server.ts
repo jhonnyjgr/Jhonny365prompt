@@ -3,17 +3,30 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import admin from 'firebase-admin';
+import { getFirestore } from 'firebase-admin/firestore';
 import firebaseConfig from './firebase-applet-config.json' assert { type: 'json' };
 
-// Initialize Firebase Admin
-if (!admin.apps.length) {
-  admin.initializeApp({
-    projectId: firebaseConfig.projectId,
-  });
-}
+// Set environment variables to force the correct project ID before any SDK initialization
+process.env.GOOGLE_CLOUD_PROJECT = firebaseConfig.projectId;
+process.env.GCLOUD_PROJECT = firebaseConfig.projectId;
 
-const db = admin.firestore();
-const auth = admin.auth();
+// Initialize Firebase Admin
+// We MUST provide the projectId explicitly to avoid connecting to the default cloud project
+const adminApp = admin.apps.length 
+  ? admin.app() 
+  : admin.initializeApp({
+      projectId: firebaseConfig.projectId,
+      credential: admin.credential.applicationDefault()
+    });
+
+// Access the specific database
+// Use fallback logic for databaseId
+let firestoreDatabaseId = firebaseConfig.firestoreDatabaseId || '(default)';
+let db = getFirestore(adminApp, firestoreDatabaseId);
+const auth = admin.auth(adminApp);
+
+console.log('Firebase Admin initialized with Project ID:', firebaseConfig.projectId);
+console.log('Using Database Instance:', firestoreDatabaseId);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,14 +43,22 @@ async function startServer() {
     if (!token) return res.status(401).json({ error: 'No autorizado' });
     try {
       const decodedToken = await auth.verifyIdToken(token);
-      const userDoc = await db.collection('users').doc(decodedToken.uid).get();
+      let userDoc;
+      try {
+        userDoc = await db.collection('users').doc(decodedToken.uid).get();
+      } catch (dbError: any) {
+        console.error('Firestore Admin Auth Error:', dbError);
+        return res.status(500).json({ error: 'Error interno de base de datos en autenticación', details: dbError.message });
+      }
+      
       if (!userDoc.exists) {
-        return res.status(401).json({ error: 'Usuario no encontrado en base de datos' });
+        return res.status(401).json({ error: 'Usuario no encontrado en base de datos. Por favor, completa tu registro.' });
       }
       req.user = { id: decodedToken.uid, ...userDoc.data() };
       next();
-    } catch (error) {
-      res.status(401).json({ error: 'Token inválido' });
+    } catch (error: any) {
+      console.error('Admin Auth verify token error:', error);
+      res.status(401).json({ error: 'Token inválido o expirado' });
     }
   };
 
@@ -270,17 +291,39 @@ async function startServer() {
 
   // Stats
   app.get('/api/stats', async (req, res) => {
-    const userSnapshot = await db.collection('users').get();
-    const promptSnapshot = await db.collection('prompts').get();
-    let totalCopies = 0;
-    promptSnapshot.docs.forEach(doc => {
-      totalCopies += doc.data().copyCount || 0;
-    });
-    res.json({
-      userCount: userSnapshot.size,
-      promptCount: promptSnapshot.size,
-      totalCopies
-    });
+    try {
+      console.log('Fetching stats from database:', firestoreDatabaseId);
+      
+      let userCount = 0;
+      let promptCount = 0;
+      let totalCopies = 0;
+
+      try {
+        const userSnapshot = await db.collection('users').get();
+        userCount = userSnapshot.size;
+      } catch (e: any) {
+        console.warn('Could not fetch user count:', e.message);
+      }
+
+      try {
+        const promptSnapshot = await db.collection('prompts').get();
+        promptCount = promptSnapshot.size;
+        promptSnapshot.docs.forEach(doc => {
+          totalCopies += (doc.data().copyCount || 0);
+        });
+      } catch (e: any) {
+        console.warn('Could not fetch prompt count:', e.message);
+      }
+      
+      res.json({ userCount, promptCount, totalCopies });
+    } catch (error: any) {
+      console.error('Stats endpoint error Details:', error);
+      // Log more context if it's a permission error
+      if (error.code === 7 || error.details?.includes('permission') || error.message?.includes('permission')) {
+        console.error('CRITICAL: PERMISSION_DENIED on Firestore Admin. This usually means the service account lacks scope for the specific database instance:', firebaseConfig.firestoreDatabaseId);
+      }
+      res.status(500).json({ error: 'Error al obtener estadísticas', details: error.message });
+    }
   });
 
   // Vite Middleware
@@ -303,5 +346,12 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
 

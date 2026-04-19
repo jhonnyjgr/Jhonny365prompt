@@ -6,82 +6,61 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Test connection path
+    match /test/connection {
+      allow read: if true;
+    }
+
     // 3. Primitive Definition
-    function isSignedIn() {
-      return request.auth != null;
-    }
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
     
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
-    }
-
-    function getUserData() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
-    }
-
-    function isVIP() {
-      let data = getUserData();
-      return data.role == 'VIP' || data.role == 'Admin VIP';
-    }
-
+    // Auth helper using get() - Admin check
     function isAdmin() {
-      return getUserData().role == 'Admin VIP';
+      return isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin VIP';
     }
 
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
-    }
-
-    function incoming() {
-      return request.resource.data;
-    }
-
-    function existing() {
-      return resource.data;
-    }
-
-    // 1. Users
+    // 1. Users Collection
     match /users/{userId} {
       function isValidUser(data) {
-        return data.username is string && data.username.size() >= 3 && data.username.size() <= 32
+        return data.username is string && data.username.size() >= 3 && data.username.size() <= 40
           && data.role in ['Regular', 'VIP', 'Admin VIP']
-          && data.createdAt == request.time;
+          && data.createdAt is timestamp;
       }
 
       allow get: if isSignedIn();
       allow list: if isAdmin();
-      allow create: if isOwner(userId) && isValidUser(incoming()) && incoming().role == 'Regular';
-      allow update: if isOwner(userId) && (
-        // Only allow updating profilePic and maybe username (if verified)
-        // role updates MUST be restricted to Cloud Functions or Admin SDK
-        incoming().diff(existing()).affectedKeys().hasOnly(['profilePic', 'username'])
-      ) || isAdmin();
+      allow create: if isOwner(userId) && isValidUser(incoming()) && incoming().role == 'Regular' && incoming().createdAt == request.time;
+      allow update: if (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['profilePic', 'username', 'updatedAt']) && incoming().updatedAt == request.time)
+                   || isAdmin();
     }
 
-    // 2. Prompts
+    // 2. Prompts Collection
     match /prompts/{promptId} {
       function isValidPrompt(data) {
         return data.title is string && data.title.size() <= 200
-          && data.content is string && data.content.size() <= 5000
+          && data.content is string && data.content.size() <= 10000
           && data.category is string
           && data.authorId == request.auth.uid
-          && data.createdAt == request.time
-          && (data.isVip == false || isVIP());
+          && data.createdAt is timestamp;
       }
 
-      allow read: if (existing().isPublic == true) || (isSignedIn() && existing().authorId == request.auth.uid) || isAdmin();
-      allow list: if (resource.data.isPublic == true) || (resource.data.authorId == request.auth.uid) || isAdmin();
+      allow read: if (existing().isPublic == true) || isOwner(existing().authorId) || isAdmin();
+      allow list: if (resource.data.isPublic == true) || (isSignedIn() && resource.data.authorId == request.auth.uid) || isAdmin();
       
-      allow create: if isSignedIn() && isValidPrompt(incoming()) && isValidId(promptId);
+      allow create: if isSignedIn() && isValidPrompt(incoming()) && incoming().createdAt == request.time && isValidId(promptId);
       allow update: if isSignedIn() && (
-        (isOwner(existing().authorId) && incoming().authorId == existing().authorId && incoming().createdAt == existing().createdAt) 
+        (isOwner(existing().authorId) && incoming().authorId == existing().authorId && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'content', 'category', 'isPublic', 'isVip', 'updatedAt']) && incoming().updatedAt == request.time)
         || (incoming().diff(existing()).affectedKeys().hasOnly(['copyCount']) && incoming().copyCount == existing().copyCount + 1)
         || isAdmin()
       );
       allow delete: if isOwner(existing().authorId) || isAdmin();
     }
 
-    // 4. Conversations
+    // 4. Conversations & Messages
     match /conversations/{conversationId} {
       function isParticipant(data) {
         return request.auth.uid == data.user1Id || request.auth.uid == data.user2Id;
@@ -92,18 +71,16 @@ service cloud.firestore {
       
       allow create: if isSignedIn() && isParticipant(incoming()) && incoming().createdAt == request.time;
       allow update: if isSignedIn() && isParticipant(existing()) && incoming().updatedAt == request.time;
-      allow delete: if isAdmin();
 
-      // Subcollection: Messages
       match /messages/{messageId} {
         function isValidMessage(data) {
-          return data.content is string && data.content.size() <= 2000
+          return data.content is string && data.content.size() <= 5000
             && data.senderId == request.auth.uid
-            && data.createdAt == request.time;
+            && data.createdAt is timestamp;
         }
 
         allow read, list: if isSignedIn() && isParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data);
-        allow create: if isSignedIn() && isParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) && isValidMessage(incoming());
+        allow create: if isSignedIn() && isParticipant(get(/databases/$(database)/documents/conversations/$(conversationId)).data) && isValidMessage(incoming()) && incoming().createdAt == request.time;
         allow update: if isSignedIn() && isOwner(existing().senderId) && incoming().diff(existing()).affectedKeys().hasOnly(['content', 'isEdited', 'updatedAt']) && incoming().updatedAt == request.time;
         allow delete: if isOwner(existing().senderId) || isAdmin();
       }
